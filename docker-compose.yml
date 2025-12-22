@@ -1,0 +1,170 @@
+version: '3.8'
+
+services:
+  # ==========================================
+  # 🗄️ PostgreSQL - Source of Truth
+  # ==========================================
+  postgres:
+    image: postgres:15-alpine
+    container_name: gateway-postgres
+    environment:
+      POSTGRES_USER: gateway
+      POSTGRES_PASSWORD: gateway_secret
+      POSTGRES_DB: gateway
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./infra/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gateway"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - gateway-network
+
+  # ==========================================
+  # 📦 Redis - Cache & Rate Limiting
+  # ==========================================
+  redis:
+    image: redis:7-alpine
+    container_name: gateway-redis
+    command: redis-server --appendonly yes
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - gateway-network
+
+  # ==========================================
+  # 🐰 RabbitMQ - Message Queue
+  # ==========================================
+  rabbitmq:
+    image: rabbitmq:3.12-management-alpine
+    container_name: gateway-rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: gateway
+      RABBITMQ_DEFAULT_PASS: gateway_secret
+    ports:
+      - "5672:5672"   # AMQP
+      - "15672:15672" # Management UI
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "check_running"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    networks:
+      - gateway-network
+
+  # ==========================================
+  # 🌐 API Gateway
+  # ==========================================
+  api-gateway:
+    build:
+      context: ./api-gateway
+      dockerfile: Dockerfile
+    container_name: gateway-api
+    environment:
+      - NODE_ENV=development
+      - PORT=3000
+      - REDIS_URL=redis://redis:6379
+      - PAYMENT_SERVICE_URL=http://payment-service:3001
+    ports:
+      - "3000:3000"
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - gateway-network
+
+  # ==========================================
+  # 💰 Payment Service
+  # ==========================================
+  payment-service:
+    build:
+      context: ./payment-service
+      dockerfile: Dockerfile
+    container_name: gateway-payment
+    env_file:
+      - .env
+    environment:
+      - NODE_ENV=development
+      - PORT=3001
+      - DATABASE_URL=postgresql://gateway:gateway_secret@postgres:5432/gateway
+      - REDIS_URL=redis://redis:6379
+      - RABBITMQ_URL=amqp://gateway:gateway_secret@rabbitmq:5672
+    ports:
+      - "3001:3001"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - gateway-network
+
+  # ==========================================
+  # 🔔 Notification Service
+  # ==========================================
+  notification-service:
+    build:
+      context: ./notification-service
+      dockerfile: Dockerfile
+    container_name: gateway-notification
+    env_file:
+      - .env
+    environment:
+      - NODE_ENV=development
+      - PORT=3002
+      - WEBSOCKET_PORT=3003
+      - RABBITMQ_URL=amqp://gateway:gateway_secret@rabbitmq:5672
+    ports:
+      - "3002:3002"
+      - "3003:3003"
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - gateway-network
+
+  # ==========================================
+  # ✉️ Email Service
+  # ==========================================
+  email-service:
+    build:
+      context: ./email-service
+      dockerfile: Dockerfile
+    container_name: gateway-email
+    env_file:
+      - .env
+    environment:
+      - NODE_ENV=development
+      - PORT=3004
+      - RABBITMQ_URL=amqp://gateway:gateway_secret@rabbitmq:5672
+    ports:
+      - "3004:3004"
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - gateway-network
+
+volumes:
+  postgres_data:
+  redis_data:
+  rabbitmq_data:
+
+networks:
+  gateway-network:
+    driver: bridge
