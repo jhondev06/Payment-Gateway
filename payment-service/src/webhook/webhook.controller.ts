@@ -36,12 +36,13 @@ export class WebhookController {
             action: body.action,
         });
 
-        // Always ACK immediately
+        const rawBody = req.raw?.toString() || req.body;
+
         try {
-            await this.webhookService.processWebhook(body, signature, requestId);
+            await this.webhookService.processWebhook(body, signature, requestId, rawBody);
         } catch (error) {
-            // Log but don't fail - we already ACKed
             this.logger.error('Failed to process webhook', error, { requestId });
+            throw error;
         }
 
         return { status: 'ok' };

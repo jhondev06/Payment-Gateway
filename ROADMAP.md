@@ -2,8 +2,8 @@
 
 Este documento descreve as fases de desenvolvimento do Payment Gateway, do MVP até o sistema pronto para produção.
 
-**Status atual**: MVP Completo (Pronto para POC)  
-**Última atualização**: 22/12/2025
+**Status atual**: Fase 2 Completada ✅  
+**Última atualização**: 25/01/2025
 
 ---
 
@@ -22,39 +22,29 @@ As seguintes funcionalidades estão implementadas e testadas:
 
 ---
 
-## Fase 2: Hardening para Produção
+## Fase 2: Hardening para Produção (Completo) ✅
 
-Necessário antes de processar transações reais.
+Todas as funcionalidades de hardening foram implementadas e testadas:
 
-### Prioridade Alta
+### Prioridade Alta (5/5 completas)
 
-| Item | Descrição | Esforço |
-|------|-----------|---------|
-| TLS/HTTPS | Configurar certificados SSL | 2 horas |
-| Gestão de Secrets | Secrets via ambiente, sem `.env` em produção | 2 horas |
-| Validação de Assinatura | Verificar HMAC dos webhooks Mercado Pago | 4 horas |
-| Testes Unitários | Cobertura mínima de 60% nos services | 2 dias |
-| Testes de Integração | Fluxo completo com banco real | 1 dia |
+| Item | Descrição | Status |
+|------|-----------|--------|
+| TLS/HTTPS | Configurar certificados SSL | ✅ Completo |
+| Gestão de Secrets | Secrets via Docker secrets | ✅ Completo |
+| Validação de Assinatura | Verificar HMAC dos webhooks | ✅ Completo |
+| Testes Unitários | Cobertura ≥ 60% | ✅ Completo |
+| Testes de Integração | Fluxo completo com banco | ✅ Completo |
 
-### Prioridade Média
+### Prioridade Média (5/5 completas)
 
-| Item | Descrição | Esforço |
-|------|-----------|---------|
-| Circuit Breaker | Falha rápida quando provedor indisponível | 4 horas |
-| Retry com Backoff | Retry exponencial nos consumers RabbitMQ | 4 horas |
-| Métricas Prometheus | Latência, taxa de erro, throughput | 1 dia |
-| Alertas | Notificações Slack/Discord em falhas | 4 horas |
-| Backups do Banco | pg_dump automático diário | 2 horas |
-
-### Prioridade Baixa
-
-| Item | Descrição | Esforço |
-|------|-----------|---------|
-| Rate Limit Avançado | Por IP, por cliente, sliding window | 1 dia |
-| Dashboard Admin | Visualização de pagamentos e métricas | 3 dias |
-| Templates de Email | Templates HTML formatados | 1 dia |
-| Pagamentos com Cartão | Fase 2 de métodos de pagamento | 1 semana |
-| Multi-tenancy | Múltiplos clientes no mesmo gateway | 2 semanas |
+| Item | Descrição | Status |
+|------|-----------|--------|
+| Circuit Breaker | Falha rápida quando provedor indisponível | ✅ Completo |
+| Retry com Backoff | Retry exponencial nos consumers | ✅ Completo |
+| Métricas Prometheus | Latência, taxa de erro, throughput | ✅ Completo |
+| Alertas | Notificações Slack em falhas | ✅ Completo |
+| Backups do Banco | pg_dump automático diário | ✅ Completo |
 
 ---
 

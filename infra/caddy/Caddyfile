@@ -1,0 +1,45 @@
+{
+    # Email para registro Let's Encrypt
+    email admin@yourdomain.com
+    
+    # ACME server (Staging para testes, Production para real)
+    # Comente uma das linhas abaixo
+    # acme_ca https://acme-staging-v02.api.letsencrypt.org/directory
+    # acme_ca https://acme-v02.api.letsencrypt.org/directory
+    
+    # Global options
+    servers {
+        protocol {
+            strict_sni_host
+            allow_h2c
+        }
+    }
+}
+
+# ========================================
+# API Gateway
+# ========================================
+{$CADDY_DOMAIN:localhost}:443 {
+    reverse_proxy api-gateway:3000
+    
+    # Headers de segurança
+    header {
+        X-Frame-Options "SAMEORIGIN"
+        X-Content-Type-Options "nosniff"
+        X-XSS-Protection "1; mode=block"
+        Referrer-Policy "strict-origin-when-cross-origin"
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+    }
+    
+    # Logging
+    log {
+        output file /var/log/caddy/access.log
+        format json
+        level INFO
+    }
+}
+
+# Redirecionar HTTP para HTTPS
+{$CADDY_DOMAIN:localhost}:80 {
+    redir https://{host}{uri} permanent
+}

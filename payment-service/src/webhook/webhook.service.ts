@@ -1,7 +1,9 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, UnauthorizedException } from '@nestjs/common';
 import { PaymentService } from '../payment/payment.service';
 import { DatabaseService } from '../infra/database/database.service';
+import { MercadoPagoProvider } from '../infra/mercadopago/mercadopago.provider';
 import { Logger } from '../shared/logger';
+import { getSecretValue } from '../shared/secrets.validator';
 
 interface MercadoPagoWebhookPayload {
     id: string;
@@ -19,6 +21,8 @@ interface MercadoPagoWebhookPayload {
 @Injectable()
 export class WebhookService {
     private readonly logger = new Logger('WebhookService');
+    private readonly mpProvider = new MercadoPagoProvider();
+    public readonly webhookSecret = getSecretValue('MP_WEBHOOK_SECRET') || '';
 
     constructor(
         private readonly paymentService: PaymentService,
@@ -32,19 +36,47 @@ export class WebhookService {
         payload: MercadoPagoWebhookPayload,
         signature: string,
         requestId: string,
+        rawBody?: string,
     ): Promise<void> {
 
-        // 1. Store raw event for audit
+        // 1. Validate webhook signature
+        if (!this.webhookSecret) {
+            this.logger.warn('Webhook secret não configurado, pulando validação');
+        } else if (!signature) {
+            this.logger.warn('Webhook recebido sem assinatura, rejeitando');
+            throw new UnauthorizedException('Missing webhook signature');
+        } else if (!rawBody) {
+            this.logger.warn('Raw body não disponível, não é possível validar assinatura');
+            throw new UnauthorizedException('Cannot validate signature without raw body');
+        } else {
+            const isValid = this.mpProvider.validateWebhookSignature(
+                rawBody,
+                signature,
+                this.webhookSecret,
+            );
+
+            if (!isValid) {
+                this.logger.warn('Assinatura de webhook inválida', {
+                    signature,
+                    requestId,
+                });
+                throw new UnauthorizedException('Invalid webhook signature');
+            }
+
+            this.logger.info('Assinatura de webhook validada com sucesso', { requestId });
+        }
+
+        // 2. Store raw event for audit
         await this.storeProviderEvent(payload, signature);
 
-        // 2. Check for duplicate (idempotency)
+        // 3. Check for duplicate (idempotency)
         const isDuplicate = await this.isDuplicateEvent(payload.id);
         if (isDuplicate) {
             this.logger.info('Duplicate webhook ignored', { eventId: payload.id });
             return;
         }
 
-        // 3. Route by event type
+        // 4. Route by event type
         if (payload.type === 'payment') {
             await this.handlePaymentEvent(payload);
         }

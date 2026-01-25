@@ -4,6 +4,9 @@ import * as nodemailer from 'nodemailer';
 const RABBITMQ_URL = process.env.RABBITMQ_URL || 'amqp://localhost:5672';
 const FEATURE_EMAIL = process.env.FEATURE_EMAIL === 'true';
 
+const MAX_RETRIES = 3;
+const INITIAL_RETRY_DELAY = 1000;
+
 /**
  * Logger
  */
@@ -123,9 +126,12 @@ async function handlePaymentEvent(
 }
 
 /**
- * Setup RabbitMQ consumer
+ * Setup RabbitMQ consumer with exponential backoff retry
  */
-async function setupRabbitMQ(transporter: nodemailer.Transporter | null) {
+async function setupRabbitMQWithRetry(
+    transporter: nodemailer.Transporter | null,
+    retryCount = 0,
+): Promise<void> {
     try {
         const connection = await amqp.connect(RABBITMQ_URL);
         const channel = await connection.createChannel();
@@ -141,15 +147,44 @@ async function setupRabbitMQ(transporter: nodemailer.Transporter | null) {
                 await handlePaymentEvent(transporter, event);
                 channel.ack(msg);
             } catch (error) {
-                log('ERROR', 'Failed to process message', { error: (error as Error).message });
-                channel.nack(msg, false, false);
+                log('ERROR', 'Failed to process message', {
+                    error: (error as Error).message,
+                    retryCount: (msg.fields.headers['x-retry-count'] as number) || 0,
+                });
+
+                const currentRetryCount = (msg.fields.headers['x-retry-count'] as number) || 0;
+
+                if (currentRetryCount >= MAX_RETRIES) {
+                    log('ERROR', 'Max retries reached, moving to DLQ');
+                    // Don't requeue - will go to DLQ if configured
+                    channel.nack(msg, false, false);
+                } else {
+                    // Requeue with exponential backoff delay
+                    const delay = INITIAL_RETRY_DELAY * Math.pow(2, currentRetryCount);
+                    channel.nack(msg, false, true);
+                    log('INFO', 'Message requeued for retry', { delay, retryCount: currentRetryCount + 1 });
+                }
             }
         });
 
         log('INFO', 'RabbitMQ consumer started');
     } catch (error) {
-        log('ERROR', 'Failed to connect to RabbitMQ', { error: (error as Error).message });
-        setTimeout(() => setupRabbitMQ(transporter), 5000);
+        if (retryCount >= MAX_RETRIES) {
+            log('ERROR', 'Max retries reached for RabbitMQ connection', {
+                error: (error as Error).message
+            });
+            // Exponential backoff before next retry
+            const delay = INITIAL_RETRY_DELAY * Math.pow(2, retryCount);
+            log('WARN', `Retrying in ${delay}ms`);
+            setTimeout(() => setupRabbitMQWithRetry(transporter, 0), delay);
+        } else {
+            const delay = INITIAL_RETRY_DELAY * Math.pow(2, retryCount);
+            log('WARN', `RabbitMQ connection failed, retrying in ${delay}ms`, {
+                error: (error as Error).message,
+                retryCount: retryCount + 1
+            });
+            setTimeout(() => setupRabbitMQWithRetry(transporter, retryCount + 1), delay);
+        }
     }
 }
 
@@ -165,7 +200,7 @@ async function main() {
     }
 
     const transporter = createTransporter();
-    await setupRabbitMQ(transporter);
+    await setupRabbitMQWithRetry(transporter);
 
     log('INFO', 'Email Service ready');
 }

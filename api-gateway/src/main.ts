@@ -3,17 +3,38 @@ import express, { Request, Response, NextFunction } from 'express';
 import { createProxyMiddleware } from 'http-proxy-middleware';
 import Redis from 'ioredis';
 import { v4 as uuidv4 } from 'uuid';
+import { validateSecrets, getSecretValue } from './secrets.validator';
+
+validateSecrets([
+    {
+        name: 'API Key',
+        envKey: 'API_KEY',
+        required: true,
+        description: 'API Key para autenticação de requisições',
+    },
+    {
+        name: 'Redis URL',
+        envKey: 'REDIS_URL',
+        required: true,
+        description: 'String de conexão do Redis',
+    },
+    {
+        name: 'Payment Service URL',
+        envKey: 'PAYMENT_SERVICE_URL',
+        required: true,
+        description: 'URL do Payment Service para proxy',
+    },
+]);
 
 const app = express();
 const port = process.env.PORT || 3000;
 
-// Redis for rate limiting
+const apiKey = getSecretValue('API_KEY') || 'your-api-key-here';
+
 const redis = new Redis(process.env.REDIS_URL || 'redis://localhost:6379');
 
-// Middleware: JSON parser
 app.use(express.json());
 
-// Middleware: Correlation ID
 app.use((req: Request, res: Response, next: NextFunction) => {
     const correlationId = req.headers['x-correlation-id'] as string || uuidv4();
     req.headers['x-correlation-id'] = correlationId;
@@ -21,17 +42,14 @@ app.use((req: Request, res: Response, next: NextFunction) => {
     next();
 });
 
-// Middleware: API Key Authentication
 const authMiddleware = (req: Request, res: Response, next: NextFunction) => {
-    const apiKey = req.headers['x-api-key'] as string;
-    const validApiKey = process.env.API_KEY || 'your-api-key-here';
+    const clientApiKey = req.headers['x-api-key'] as string;
 
-    // Skip auth for health checks
     if (req.path === '/health') {
         return next();
     }
 
-    if (!apiKey || apiKey !== validApiKey) {
+    if (!clientApiKey || clientApiKey !== apiKey) {
         return res.status(401).json({
             error: 'Unauthorized',
             message: 'Invalid or missing X-API-Key header',

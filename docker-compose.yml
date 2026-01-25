@@ -2,14 +2,40 @@ version: '3.8'
 
 services:
   # ==========================================
+  # 🔒 Caddy - Reverse Proxy & HTTPS
+  # ==========================================
+  caddy:
+    image: caddy:2-alpine
+    container_name: gateway-caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./infra/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+      - caddy_logs:/var/log/caddy
+    environment:
+      CADDY_DOMAIN: ${CADDY_DOMAIN:-localhost}
+    networks:
+      - gateway-network
+    healthcheck:
+      test: ["CMD", "caddy", "version"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ==========================================
   # 🗄️ PostgreSQL - Source of Truth
   # ==========================================
   postgres:
     image: postgres:15-alpine
     container_name: gateway-postgres
     environment:
-      POSTGRES_USER: gateway
-      POSTGRES_PASSWORD: gateway_secret
+      POSTGRES_USER: ${POSTGRES_USER:-gateway}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: gateway
     ports:
       - "5432:5432"
@@ -23,6 +49,8 @@ services:
       retries: 5
     networks:
       - gateway-network
+    secrets:
+      - postgres_password
 
   # ==========================================
   # 📦 Redis - Cache & Rate Limiting
@@ -30,18 +58,20 @@ services:
   redis:
     image: redis:7-alpine
     container_name: gateway-redis
-    command: redis-server --appendonly yes
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD}
     ports:
       - "6379:6379"
     volumes:
       - redis_data:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
       interval: 10s
       timeout: 5s
       retries: 5
     networks:
       - gateway-network
+    secrets:
+      - redis_password
 
   # ==========================================
   # 🐰 RabbitMQ - Message Queue
@@ -50,11 +80,11 @@ services:
     image: rabbitmq:3.12-management-alpine
     container_name: gateway-rabbitmq
     environment:
-      RABBITMQ_DEFAULT_USER: gateway
-      RABBITMQ_DEFAULT_PASS: gateway_secret
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-gateway}
+      RABBITMQ_DEFAULT_PASS_FILE: /run/secrets/rabbitmq_password
     ports:
-      - "5672:5672"   # AMQP
-      - "15672:15672" # Management UI
+      - "5672:5672"
+      - "15672:15672"
     volumes:
       - rabbitmq_data:/var/lib/rabbitmq
     healthcheck:
@@ -64,6 +94,8 @@ services:
       retries: 5
     networks:
       - gateway-network
+    secrets:
+      - rabbitmq_password
 
   # ==========================================
   # 🌐 API Gateway
@@ -74,17 +106,22 @@ services:
       dockerfile: Dockerfile
     container_name: gateway-api
     environment:
-      - NODE_ENV=development
+      - NODE_ENV=${NODE_ENV:-development}
       - PORT=3000
-      - REDIS_URL=redis://redis:6379
+      - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379
       - PAYMENT_SERVICE_URL=http://payment-service:3001
-    ports:
-      - "3000:3000"
+      - API_KEY_FILE=/run/secrets/api_key
+    expose:
+      - "3000"
     depends_on:
       redis:
         condition: service_healthy
+      caddy:
+        condition: service_healthy
     networks:
       - gateway-network
+    secrets:
+      - api_key
 
   # ==========================================
   # 💰 Payment Service
@@ -97,13 +134,15 @@ services:
     env_file:
       - .env
     environment:
-      - NODE_ENV=development
+      - NODE_ENV=${NODE_ENV:-development}
       - PORT=3001
-      - DATABASE_URL=postgresql://gateway:gateway_secret@postgres:5432/gateway
-      - REDIS_URL=redis://redis:6379
-      - RABBITMQ_URL=amqp://gateway:gateway_secret@rabbitmq:5672
-    ports:
-      - "3001:3001"
+      - DATABASE_URL=postgresql://gateway:${POSTGRES_PASSWORD}@postgres:5432/gateway
+      - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379
+      - RABBITMQ_URL=amqp://gateway:${RABBITMQ_PASSWORD}@rabbitmq:5672
+      - MP_ACCESS_TOKEN_FILE=/run/secrets/mp_access_token
+      - MP_WEBHOOK_SECRET_FILE=/run/secrets/mp_webhook_secret
+    expose:
+      - "3001"
     depends_on:
       postgres:
         condition: service_healthy
@@ -113,6 +152,9 @@ services:
         condition: service_healthy
     networks:
       - gateway-network
+    secrets:
+      - mp_access_token
+      - mp_webhook_secret
 
   # ==========================================
   # 🔔 Notification Service
@@ -125,10 +167,10 @@ services:
     env_file:
       - .env
     environment:
-      - NODE_ENV=development
+      - NODE_ENV=${NODE_ENV:-development}
       - PORT=3002
       - WEBSOCKET_PORT=3003
-      - RABBITMQ_URL=amqp://gateway:gateway_secret@rabbitmq:5672
+      - RABBITMQ_URL=amqp://gateway:${RABBITMQ_PASSWORD}@rabbitmq:5672
     ports:
       - "3002:3002"
       - "3003:3003"
@@ -149,9 +191,11 @@ services:
     env_file:
       - .env
     environment:
-      - NODE_ENV=development
+      - NODE_ENV=${NODE_ENV:-development}
       - PORT=3004
-      - RABBITMQ_URL=amqp://gateway:gateway_secret@rabbitmq:5672
+      - RABBITMQ_URL=amqp://gateway:${RABBITMQ_PASSWORD}@rabbitmq:5672
+      - SMTP_USER_FILE=/run/secrets/smtp_user
+      - SMTP_PASS_FILE=/run/secrets/smtp_pass
     ports:
       - "3004:3004"
     depends_on:
@@ -160,11 +204,60 @@ services:
     networks:
       - gateway-network
 
+  # ==========================================
+  # 💾 Database Backup
+  # ==========================================
+  backup:
+    image: postgres:15-alpine
+    container_name: gateway-backup
+    environment:
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - POSTGRES_DB=gateway
+      - POSTGRES_USER=gateway
+      - SCHEDULE=0 2 * * *  # 2h da manhã
+      - DAYS_TO_KEEP=7
+    volumes:
+      - ./infra/backup/backup.sh:/app/backup.sh:ro
+      - ./infra/backup/restore.sh:/app/restore.sh:ro
+      - backup_data:/app/backups
+    secrets:
+      - postgres_password
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - gateway-network
+
 volumes:
   postgres_data:
   redis_data:
   rabbitmq_data:
+  caddy_data:
+  caddy_config:
+  caddy_logs:
+  backup_data:
 
 networks:
   gateway-network:
     driver: bridge
+
+secrets:
+  postgres_password:
+    file: ./secrets/postgres_password.txt
+  redis_password:
+    file: ./secrets/redis_password.txt
+  rabbitmq_password:
+    file: ./secrets/rabbitmq_password.txt
+  api_key:
+    file: ./secrets/api_key.txt
+  mp_access_token:
+    file: ./secrets/mp_access_token.txt
+  mp_webhook_secret:
+    file: ./secrets/mp_webhook_secret.txt
+  smtp_user:
+    file: ./secrets/smtp_user.txt
+  smtp_pass:
+    file: ./secrets/smtp_pass.txt
+
+

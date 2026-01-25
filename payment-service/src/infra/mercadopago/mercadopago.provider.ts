@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { Logger } from '../../shared/logger';
+import CircuitBreaker from 'opossum';
 
 interface CreatePixPaymentInput {
     amount: number;
@@ -20,16 +21,19 @@ interface PixPaymentResult {
  * 
  * Em modo sandbox, simula respostas para facilitar testes.
  * Em produção, integra com a API real do Mercado Pago.
+ * 
+ * @todo: Implementar integração real com API do Mercado Pago
  */
 @Injectable()
 export class MercadoPagoProvider {
     private readonly logger = new Logger('MercadoPagoProvider');
     private readonly isSandbox: boolean;
     private readonly hasValidToken: boolean;
+    private readonly circuitBreaker: CircuitBreaker;
 
     constructor() {
         const accessToken = process.env.MP_ACCESS_TOKEN || '';
-        this.isSandbox = process.env.PAYMENT_MODE === 'sandbox';
+        this.isSandbox = process.env.PAYMENT_MODE !== 'production';
 
         // Token válido: começa com TEST- e tem mais de 20 caracteres
         this.hasValidToken = accessToken.startsWith('TEST-') && accessToken.length > 20;
@@ -38,12 +42,41 @@ export class MercadoPagoProvider {
             sandbox: this.isSandbox,
             hasValidToken: this.hasValidToken,
         });
+
+        this.circuitBreaker = new CircuitBreaker(this.createPixPaymentInternal.bind(this), {
+            timeout: 5000,
+            errorThresholdPercentage: 50,
+            resetTimeout: 30000,
+        });
+
+        this.circuitBreaker.on('open', () => {
+            this.logger.warn('Circuit breaker aberto - Mercado Pago está indisponível');
+        });
+
+        this.circuitBreaker.on('halfOpen', () => {
+            this.logger.info('Circuit breaker meio-aberto - testando Mercado Pago');
+        });
+
+        this.circuitBreaker.on('close', () => {
+            this.logger.info('Circuit breaker fechado - Mercado Pago está disponível');
+        });
+
+        this.circuitBreaker.on('fallback', (result) => {
+            this.logger.warn('Fallback acionado para Mercado Pago', { result });
+        });
     }
 
     /**
-     * Cria pagamento PIX no Mercado Pago
+     * Cria pagamento PIX no Mercado Pago (com Circuit Breaker)
      */
     async createPixPayment(input: CreatePixPaymentInput): Promise<PixPaymentResult> {
+        return this.circuitBreaker.fire(input);
+    }
+
+    /**
+     * Cria pagamento PIX no Mercado Pago (implementação interna)
+     */
+    private async createPixPaymentInternal(input: CreatePixPaymentInput): Promise<PixPaymentResult> {
         this.logger.info('Criando pagamento PIX', {
             amount: input.amount,
             externalReference: input.external_reference,
@@ -107,5 +140,12 @@ export class MercadoPagoProvider {
             qr_code_base64: Buffer.from(fakeQRCode).toString('base64'),
             expiration: expirationDate,
         };
+    }
+
+    /**
+     * Health check do circuit breaker
+     */
+    getCircuitBreakerState(): string {
+        return this.circuitBreaker.state;
     }
 }

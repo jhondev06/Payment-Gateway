@@ -13,6 +13,79 @@ This document provides comprehensive instructions for AI agents (LLMs, coding as
 
 ---
 
+## Architecture Patterns (Phase 2)
+
+### Circuit Breaker Pattern
+
+Protects the system from cascading failures when external services are unavailable:
+
+```typescript
+import CircuitBreaker from 'opossum';
+
+const circuitBreaker = new CircuitBreaker(externalServiceCall, {
+    timeout: 5000,                    // 5 second timeout
+    errorThresholdPercentage: 50,       // Open if 50% of requests fail
+    resetTimeout: 30000,              // Try to close after 30 seconds
+});
+
+circuitBreaker.on('open', () => {
+    // Provider unavailable - return cached error
+});
+```
+
+**States**: `closed` (normal), `open` (failing), `half-open` (testing)
+
+### Exponential Backoff Retry
+
+For RabbitMQ consumers to avoid overwhelming failing services:
+
+```typescript
+const MAX_RETRIES = 3;
+const INITIAL_DELAY = 1000;
+
+if (retryCount >= MAX_RETRIES) {
+    // Move to Dead Letter Queue (DLQ)
+    channel.nack(msg, false, false);
+} else {
+    const delay = INITIAL_DELAY * Math.pow(2, retryCount);
+    // Requeue with delay
+    channel.nack(msg, false, true);
+}
+```
+
+**Delay progression**: 1s → 2s → 4s → DLQ
+
+### Prometheus Metrics
+
+Counter - Count occurrences of an event:
+```typescript
+metrics.incrementPaymentsCreated('BRL', 'pix');
+```
+
+Histogram - Track duration distributions:
+```typescript
+const start = Date.now();
+// ... operation ...
+metrics.observePaymentProcessing((Date.now() - start) / 1000, 'BRL', 'pix');
+```
+
+Gauge - Track current value:
+```typescript
+metrics.setQueueLength('notification.events', 42);
+metrics.setCircuitBreakerState('mercadopago', 'open');
+```
+
+### Alert Levels
+
+Use appropriate alert level based on severity:
+
+- **CRITICAL**: Service down, data loss, security breach
+- **ERROR**: Payment failures, provider unavailable
+- **WARNING**: High latency, circuit breaker opened, retry exceeded
+- **INFO**: Successful recovery, periodic updates
+
+---
+
 ## Directory Structure
 
 ```
@@ -45,8 +118,12 @@ gateway/
 2. **Follow existing patterns** - Check similar files before creating new ones
 3. **Run tests after changes** - `npm test` in payment-service/
 4. **Maintain idempotency** - Every payment operation must be idempotent
-5. **Log with context** - Use the Logger class with structured JSON output
+5. **Log with context** - Use Logger class with structured JSON output
 6. **Type everything** - No implicit any, define interfaces
+7. **Use secrets via environment** - Never hardcode credentials
+8. **Validate webhook signatures** - Always verify HMAC in production
+9. **Use circuit breakers** - Wrap external service calls with Opossum
+10. **Track metrics** - Use MetricsService for business operations
 
 ---
 
@@ -142,11 +219,37 @@ await this.eventPublisher.publish('exchange', event);
 3. Inject in `PaymentService`
 4. Add new status types if needed
 
+### Adding Circuit Breaker to External Calls
+
+1. Import Opossum: `import CircuitBreaker from 'opossum'`
+2. Wrap the external call: `this.circuitBreaker.fire(input)`
+3. Configure thresholds in constructor
+4. Track circuit breaker state via MetricsService
+
+### Adding Metrics
+
+1. Use MetricsService: inject in your service
+2. Call appropriate methods:
+   - Counters: `metrics.incrementPaymentsCreated(currency, method)`
+   - Histograms: `metrics.observePaymentProcessing(duration, currency, method)`
+   - Gauges: `metrics.setQueueLength(queueName, length)`
+3. Metrics are automatically exposed at `/health/metrics`
+
+### Sending Alerts
+
+1. Inject AlertService: `constructor(private readonly alertService: AlertService) {}`
+2. Use appropriate alert level:
+   - Critical: `alertService.sendCriticalAlert(title, message, context)`
+   - Error: `alertService.sendErrorAlert(title, message, context)`
+   - Warning: `alertService.sendWarningAlert(title, message, context)`
+   - Info: `alertService.sendInfoAlert(title, message, context)`
+
 ### Modifying Database Schema
 
 1. Update `infra/postgres/init.sql`
 2. Update interfaces in `payment.dto.ts`
 3. Update `payment.repository.ts`
+4. Consider using migrations in production (Phase 3)
 
 ---
 
@@ -201,6 +304,28 @@ Key variables (see `.env.example` for full list):
 | `MP_ACCESS_TOKEN` | No | Mercado Pago token (sandbox simulates if empty) |
 | `PAYMENT_MODE` | No | `sandbox` or `production` |
 | `FEATURE_SANDBOX_ENDPOINTS` | No | Enable test endpoints |
+| `CADDY_DOMAIN` | Yes (production) | Domain for Let's Encrypt |
+| `CADDY_EMAIL` | Yes (production) | Email for Let's Encrypt |
+| `SLACK_WEBHOOK_URL` | No | Slack webhook for alerts |
+| `NODE_ENV` | No | `development` or `production` |
+| `LOG_LEVEL` | No | `debug`, `info`, `warn`, or `error` |
+
+### Secrets Management
+
+All sensitive data MUST use Docker secrets:
+
+| Secret | File | Description |
+|--------|-------|-------------|
+| PostgreSQL Password | `secrets/postgres_password.txt` | Database password |
+| Redis Password | `secrets/redis_password.txt` | Redis password |
+| RabbitMQ Password | `secrets/rabbitmq_password.txt` | RabbitMQ password |
+| API Key | `secrets/api_key.txt` | API gateway authentication |
+| MP Access Token | `secrets/mp_access_token.txt` | Mercado Pago token |
+| MP Webhook Secret | `secrets/mp_webhook_secret.txt` | Webhook signature validation |
+| SMTP User | `secrets/smtp_user.txt` | SMTP username |
+| SMTP Password | `secrets/smtp_pass.txt` | SMTP password |
+
+**Important**: Never commit secrets to git. All secret files are in .gitignore.
 
 ---
 
@@ -265,3 +390,5 @@ Key variables (see `.env.example` for full list):
 | Version | Date | Changes |
 |---------|------|---------|
 | 1.0.0 | 2024-12-22 | Initial MVP release |
+| 1.1.0 | 2025-01-25 | Phase 2 - Hardening for Production |
+
