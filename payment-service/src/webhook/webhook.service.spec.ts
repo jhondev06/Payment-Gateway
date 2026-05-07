@@ -4,6 +4,7 @@ describe('WebhookService', () => {
     let service: WebhookService;
     let paymentServiceMock: any;
     let dbMock: any;
+    let mpProviderMock: any;
 
     beforeEach(() => {
         paymentServiceMock = {
@@ -14,7 +15,11 @@ describe('WebhookService', () => {
             query: jest.fn(),
         };
 
-        service = new WebhookService(paymentServiceMock, dbMock);
+        mpProviderMock = {
+            validateWebhookSignature: jest.fn().mockReturnValue(true),
+        };
+
+        service = new WebhookService(paymentServiceMock, dbMock, mpProviderMock);
     });
 
     describe('processWebhook', () => {
@@ -118,7 +123,6 @@ describe('WebhookService', () => {
 
         it('deve ignorar evento duplicado', async () => {
             dbMock.query
-                .mockResolvedValueOnce({ rows: [], rowCount: 1 })
                 .mockResolvedValueOnce({ rows: [{ id: 1 }], rowCount: 1 });
 
             await service.processWebhook(mockPayload, '', 'req-1', 'raw-body');
@@ -129,7 +133,9 @@ describe('WebhookService', () => {
 
     describe('storeProviderEvent', () => {
         it('deve lidar com erro ao armazenar evento', async () => {
-            dbMock.query.mockRejectedValue(new Error('Database error'));
+            dbMock.query
+                .mockResolvedValueOnce({ rows: [], rowCount: 0 })
+                .mockRejectedValueOnce(new Error('Database error'));
 
             const mockPayload: any = {
                 id: 'evt-123',

@@ -1,10 +1,25 @@
 import { Injectable, NotFoundException, ConflictException } from '@nestjs/common';
-import { CreatePaymentDto, Payment, PaymentEvent } from './payment.dto';
+import { CreatePaymentDto, Payment, PaymentEvent, PaymentStatus } from './payment.dto';
 import { IdempotencyService } from './idempotency.service';
 import { PaymentRepository } from './payment.repository';
 import { MercadoPagoProvider } from '../infra/mercadopago/mercadopago.provider';
 import { EventPublisher } from '../infra/rabbitmq/event.publisher';
 import { Logger } from '../shared/logger';
+import { MetricsService } from '../shared/metrics.service';
+import { AlertService } from '../shared/alert.service';
+
+/**
+ * Transições válidas da máquina de estados de pagamento
+ */
+const VALID_TRANSITIONS: Record<PaymentStatus, PaymentStatus[]> = {
+    CREATED: ['PENDING', 'FAILED'],
+    PENDING: ['PAID', 'FAILED', 'EXPIRED', 'CANCELLED'],
+    PAID: ['REFUNDED'],
+    FAILED: ['CREATED'],
+    EXPIRED: ['CREATED'],
+    REFUNDED: [],
+    CANCELLED: ['CREATED'],
+};
 
 @Injectable()
 export class PaymentService {
@@ -15,6 +30,8 @@ export class PaymentService {
         private readonly paymentRepository: PaymentRepository,
         private readonly mercadoPago: MercadoPagoProvider,
         private readonly eventPublisher: EventPublisher,
+        private readonly metricsService: MetricsService,
+        private readonly alertService: AlertService,
     ) { }
 
     /**
@@ -32,6 +49,7 @@ export class PaymentService {
         idempotencyKey: string,
         correlationId?: string,
     ): Promise<Payment> {
+        const startTime = Date.now();
 
         // 1. Verifica idempotência - retorna resposta do cache se existir
         const cached = await this.idempotencyService.get(idempotencyKey);
@@ -62,6 +80,8 @@ export class PaymentService {
             amount: payment.amount,
         });
 
+        this.metricsService.incrementPaymentsCreated('BRL', 'pix');
+
         try {
             // 3. Chama Mercado Pago para criar PIX
             const pixData = await this.mercadoPago.createPixPayment({
@@ -90,7 +110,16 @@ export class PaymentService {
                 status: updatedPayment.status,
                 amount: updatedPayment.amount,
                 timestamp: new Date().toISOString(),
+                metadata: {
+                    customer_email: dto.customer_email,
+                    customer_name: dto.customer_name,
+                    description: dto.description,
+                    ...dto.metadata,
+                },
             });
+
+            const duration = (Date.now() - startTime) / 1000;
+            this.metricsService.observePaymentProcessing(duration, 'BRL', 'pix');
 
             this.logger.info('Pagamento pendente (PIX gerado)', {
                 paymentId: updatedPayment.id,
@@ -108,6 +137,16 @@ export class PaymentService {
                     error: error instanceof Error ? error.message : 'Erro desconhecido',
                 },
             });
+
+            const duration = (Date.now() - startTime) / 1000;
+            this.metricsService.incrementPaymentsFailed('BRL', 'provider_error');
+            this.metricsService.observePaymentProcessing(duration, 'BRL', 'pix');
+
+            this.alertService.sendErrorAlert(
+                'Falha ao criar pagamento PIX',
+                error instanceof Error ? error.message : 'Erro desconhecido',
+                { paymentId: payment.id, amount: dto.amount },
+            );
 
             this.logger.error('Falha ao criar pagamento PIX', error, {
                 paymentId: payment.id,
@@ -143,19 +182,45 @@ export class PaymentService {
             throw new NotFoundException(`Pagamento com external_id ${externalId} não encontrado`);
         }
 
+        // Valida transição da máquina de estados
+        const allowedTransitions = VALID_TRANSITIONS[payment.status] || [];
+        if (!allowedTransitions.includes(status)) {
+            this.logger.warn('Transição de status inválida', {
+                paymentId: payment.id,
+                statusAtual: payment.status,
+                statusSolicitado: status,
+            });
+            throw new ConflictException(
+                `Transição inválida: ${payment.status} -> ${status}`,
+            );
+        }
+
         const updatedPayment = await this.paymentRepository.update(payment.id, {
             status,
             paid_at: status === 'PAID' ? new Date() : null,
         });
 
+        const eventType = status === 'PAID' ? 'PAYMENT_COMPLETED' : 'PAYMENT_FAILED';
+
         // Publica evento
         await this.publishEvent({
-            type: status === 'PAID' ? 'PAYMENT_COMPLETED' : 'PAYMENT_FAILED',
+            type: eventType,
             payment_id: updatedPayment.id,
             status: updatedPayment.status,
             amount: updatedPayment.amount,
             timestamp: new Date().toISOString(),
+            metadata: {
+                customer_email: payment.customer_email,
+                customer_name: payment.customer_name,
+                previous_status: payment.status,
+            },
         });
+
+        if (status === 'PAID') {
+            this.metricsService.incrementPaymentsCompleted('BRL', payment.payment_method || 'pix');
+        } else {
+            this.metricsService.incrementPaymentsFailed('BRL', status.toLowerCase());
+        }
 
         this.logger.info('Status do pagamento atualizado', {
             paymentId: payment.id,

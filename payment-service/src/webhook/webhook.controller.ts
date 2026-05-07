@@ -36,7 +36,7 @@ export class WebhookController {
             action: body.action,
         });
 
-        const rawBody = req.raw?.toString() || req.body;
+        const rawBody = (req as any).rawBody?.toString();
 
         try {
             await this.webhookService.processWebhook(body, signature, requestId, rawBody);

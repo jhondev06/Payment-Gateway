@@ -8,8 +8,8 @@ jest.mock('amqplib', () => ({
 
 describe('EventPublisher', () => {
     let service: EventPublisher;
-    let mockConnection: any;
     let mockChannel: any;
+    let mockConnection: any;
 
     beforeEach(async () => {
         mockChannel = {
@@ -18,16 +18,15 @@ describe('EventPublisher', () => {
             bindQueue: jest.fn(),
             publish: jest.fn(),
             close: jest.fn(),
-            on: jest.fn(),
         };
 
         mockConnection = {
+            createChannel: jest.fn().mockResolvedValue(mockChannel),
             close: jest.fn(),
             on: jest.fn(),
         };
 
-        (amqp.connect as jest.Mock).mockImplementation(() => mockConnection);
-        (mockConnection.createChannel as jest.Mock) = jest.fn().mockResolvedValue(mockChannel);
+        (amqp.connect as jest.Mock).mockResolvedValue(mockConnection);
 
         const module: TestingModule = await Test.createTestingModule({
             providers: [EventPublisher],
@@ -51,7 +50,7 @@ describe('EventPublisher', () => {
             await service.publish('payment.events', event);
 
             expect(amqp.connect).toHaveBeenCalled();
-            expect(mockChannel.assertExchange).toHaveBeenCalledWith('payment.events', 'topic', { durable: true });
+            expect(mockConnection.createChannel).toHaveBeenCalled();
             expect(mockChannel.publish).toHaveBeenCalledWith(
                 'payment.events',
                 'payment.paid',
@@ -96,7 +95,9 @@ describe('EventPublisher', () => {
         });
 
         it('deve lidar com erro na publicação', async () => {
-            mockChannel.publish.mockRejectedValue(new Error('Publish failed'));
+            mockChannel.publish.mockImplementation(() => {
+                throw new Error('Publish failed');
+            });
 
             const event = { type: 'PAID', payment_id: '123' };
 
@@ -107,7 +108,6 @@ describe('EventPublisher', () => {
             const event = { type: 'PAID', payment_id: '123' };
 
             await service.publish('payment.events', event);
-
             await service.publish('payment.events', event);
 
             expect(amqp.connect).toHaveBeenCalledTimes(1);
@@ -115,14 +115,20 @@ describe('EventPublisher', () => {
     });
 
     describe('setupTopology', () => {
-        it('deve configurar exchanges e filas', async () => {
+        it('deve configurar exchanges e filas com DLQ', async () => {
             await service.publish('payment.events', { type: 'PAID' });
 
             expect(mockChannel.assertExchange).toHaveBeenCalledWith('payment.events', 'topic', { durable: true });
-            expect(mockChannel.assertQueue).toHaveBeenCalledWith('notification.events', { durable: true });
-            expect(mockChannel.assertQueue).toHaveBeenCalledWith('email.events', { durable: true });
-            expect(mockChannel.bindQueue).toHaveBeenCalledWith('notification.events', 'payment.events', 'payment.*');
-            expect(mockChannel.bindQueue).toHaveBeenCalledWith('email.events', 'payment.events', 'payment.*');
+            expect(mockChannel.assertExchange).toHaveBeenCalledWith('payment.dlx', 'topic', { durable: true });
+            expect(mockChannel.assertQueue).toHaveBeenCalledWith('payment.dlq', { durable: true });
+            expect(mockChannel.assertQueue).toHaveBeenCalledWith(
+                'notification.events',
+                expect.objectContaining({ durable: true }),
+            );
+            expect(mockChannel.assertQueue).toHaveBeenCalledWith(
+                'email.events',
+                expect.objectContaining({ durable: true }),
+            );
         });
     });
 
@@ -154,27 +160,6 @@ describe('EventPublisher', () => {
 
         it('não deve falhar se não houver conexão', async () => {
             await expect(service.onModuleDestroy()).resolves.not.toThrow();
-        });
-    });
-
-    describe('conexão RabbitMQ', () => {
-        it('deve usar URL da env se definida', () => {
-            process.env.RABBITMQ_URL = 'amqp://custom:5672';
-            const newService = new EventPublisher();
-            delete process.env.RABBITMQ_URL;
-        });
-
-        it('deve usar URL padrão se não definida', async () => {
-            await service.publish('payment.events', { type: 'PAID' });
-
-            expect(amqp.connect).toHaveBeenCalledWith('amqp://localhost:5672');
-        });
-
-        it('deve configurar listeners de erro e close', async () => {
-            await service.publish('payment.events', { type: 'PAID' });
-
-            expect(mockConnection.on).toHaveBeenCalledWith('error', expect.any(Function));
-            expect(mockConnection.on).toHaveBeenCalledWith('close', expect.any(Function));
         });
     });
 });

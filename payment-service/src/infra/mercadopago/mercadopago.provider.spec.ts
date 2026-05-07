@@ -4,6 +4,13 @@ describe('MercadoPagoProvider', () => {
     let provider: MercadoPagoProvider;
     const originalEnv = process.env;
 
+    const input = {
+        amount: 100.5,
+        description: 'Test payment',
+        email: 'test@example.com',
+        external_reference: 'REF-123',
+    };
+
     beforeEach(() => {
         process.env = { ...originalEnv };
         process.env.PAYMENT_MODE = 'sandbox';
@@ -15,13 +22,6 @@ describe('MercadoPagoProvider', () => {
     });
 
     describe('createPixPayment', () => {
-        const input = {
-            amount: 100.5,
-            description: 'Test payment',
-            email: 'test@example.com',
-            external_reference: 'REF-123',
-        };
-
         it('deve simular resposta em sandbox', async () => {
             const result = await provider.createPixPayment(input);
 

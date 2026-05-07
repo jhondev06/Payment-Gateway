@@ -70,7 +70,7 @@ export class MercadoPagoProvider {
      * Cria pagamento PIX no Mercado Pago (com Circuit Breaker)
      */
     async createPixPayment(input: CreatePixPaymentInput): Promise<PixPaymentResult> {
-        return this.circuitBreaker.fire(input);
+        return this.circuitBreaker.fire(input) as Promise<PixPaymentResult>;
     }
 
     /**
@@ -146,6 +146,8 @@ export class MercadoPagoProvider {
      * Health check do circuit breaker
      */
     getCircuitBreakerState(): string {
-        return this.circuitBreaker.state;
+        if (this.circuitBreaker.opened) return 'open';
+        if (this.circuitBreaker.closed) return 'closed';
+        return 'half-open';
     }
 }

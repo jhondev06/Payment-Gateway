@@ -1,9 +1,17 @@
 import { Controller, Get } from '@nestjs/common';
 import { MetricsService } from '../shared/metrics.service';
+import { DatabaseService } from '../infra/database/database.service';
+import { RedisService } from '../infra/redis/redis.service';
+import { EventPublisher } from '../infra/rabbitmq/event.publisher';
 
 @Controller('health')
 export class HealthController {
-    constructor(private readonly metricsService: MetricsService) {}
+    constructor(
+        private readonly metricsService: MetricsService,
+        private readonly db: DatabaseService,
+        private readonly redis: RedisService,
+        private readonly eventPublisher: EventPublisher,
+    ) {}
 
     @Get()
     check() {
@@ -16,15 +24,21 @@ export class HealthController {
     }
 
     @Get('ready')
-    ready() {
-        // TODO: Check database, redis, rabbitmq connections
+    async ready() {
+        const dbHealthy = await this.db.isHealthy();
+        const redisHealthy = await this.redis.isHealthy();
+        const rabbitHealthy = await this.eventPublisher.isHealthy();
+
+        const allHealthy = dbHealthy && redisHealthy && rabbitHealthy;
+
         return {
-            status: 'ready',
+            status: allHealthy ? 'ready' : 'degraded',
             checks: {
-                database: 'ok',
-                redis: 'ok',
-                rabbitmq: 'ok',
+                database: dbHealthy ? 'ok' : 'fail',
+                redis: redisHealthy ? 'ok' : 'fail',
+                rabbitmq: rabbitHealthy ? 'ok' : 'fail',
             },
+            timestamp: new Date().toISOString(),
         };
     }
 
@@ -33,4 +47,3 @@ export class HealthController {
         return await this.metricsService.getMetrics();
     }
 }
-

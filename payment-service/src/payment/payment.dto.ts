@@ -6,7 +6,7 @@ import { IsNumber, IsString, IsOptional, IsEmail, Min, IsObject } from 'class-va
 export class CreatePaymentDto {
     @IsNumber()
     @Min(0.01)
-    amount: number;
+    amount!: number;
 
     @IsString()
     @IsOptional()
