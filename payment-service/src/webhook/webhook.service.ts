@@ -21,12 +21,12 @@ interface MercadoPagoWebhookPayload {
 @Injectable()
 export class WebhookService {
     private readonly logger = new Logger('WebhookService');
-    private readonly mpProvider = new MercadoPagoProvider();
     public readonly webhookSecret = getSecretValue('MP_WEBHOOK_SECRET') || '';
 
     constructor(
         private readonly paymentService: PaymentService,
         private readonly db: DatabaseService,
+        private readonly mpProvider: MercadoPagoProvider,
     ) { }
 
     /**
@@ -66,20 +66,23 @@ export class WebhookService {
             this.logger.info('Assinatura de webhook validada com sucesso', { requestId });
         }
 
-        // 2. Store raw event for audit
-        await this.storeProviderEvent(payload, signature);
-
-        // 3. Check for duplicate (idempotency)
+        // 2. Check for duplicate (idempotency)
         const isDuplicate = await this.isDuplicateEvent(payload.id);
         if (isDuplicate) {
             this.logger.info('Duplicate webhook ignored', { eventId: payload.id });
             return;
         }
 
+        // 3. Store raw event for audit
+        await this.storeProviderEvent(payload, signature);
+
         // 4. Route by event type
         if (payload.type === 'payment') {
             await this.handlePaymentEvent(payload);
         }
+
+        // 5. Mark event as processed
+        await this.markEventProcessed(payload.id);
     }
 
     /**
@@ -152,5 +155,19 @@ export class WebhookService {
             [eventId],
         );
         return result.rows.length > 0;
+    }
+
+    /**
+     * Marca evento como processado
+     */
+    private async markEventProcessed(eventId: string): Promise<void> {
+        try {
+            await this.db.query(
+                'UPDATE provider_events SET processed = true, processed_at = NOW() WHERE event_id = $1',
+                [eventId],
+            );
+        } catch (error) {
+            this.logger.error('Failed to mark event as processed', error as Error, { eventId });
+        }
     }
 }

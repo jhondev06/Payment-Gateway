@@ -5,6 +5,36 @@ All notable changes to the Payment Gateway project will be documented in this fi
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.1] - 2026-05-07
+
+### Fixed
+- **CRITICAL: HMAC webhook validation was broken** — `rawBody` was read incorrectly (`req.raw?.toString()` instead of `req.rawBody?.toString()`). Webhook controller now correctly accesses the raw body buffer set by the body-parser middleware. (`webhook.controller.ts:39`, `main.ts:59`)
+- **CRITICAL: Events published without metadata** — `PAYMENT_CREATED` and `PAYMENT_COMPLETED`/`PAYMENT_FAILED` events now include `metadata` (customer_email, customer_name, description, previous_status). This fixes notification and email routing that depend on `event.metadata`. (`payment.service.ts:87-150`)
+- **Duplicate webhook events never detected** — `isDuplicateEvent` now checks BEFORE storing the event (order swap), and `processed=true` is set via `markEventProcessed()` after successful handling. (`webhook.service.ts:69-85`, `markEventProcessed` method added)
+- **Duplicate `MercadoPagoProvider` instance in `WebhookService`** — Replaced `new MercadoPagoProvider()` with DI injection via constructor. Single shared circuit breaker instance now used across the service. (`webhook.service.ts:24`)
+- **Missing state machine validation** — `updatePaymentStatus` now validates transitions using `VALID_TRANSITIONS` map. Invalid transitions (e.g., `PAID -> FAILED`) throw `ConflictException`. (`payment.service.ts:185-196`)
+- **Health `/ready` endpoint always returned `ok`** — Now performs real health checks on database, Redis, and RabbitMQ connections. Returns `degraded` if any dependency is unhealthy. (`health.controller.ts`)
+- **Backup container had no scheduler** — Added `entrypoint.sh` with a polling loop that triggers backups at the configured `SCHEDULE_HOUR` (default 2h UTC). (`infra/backup/entrypoint.sh`)
+- **`amqplib` type error** — Updated `EventPublisher` to use `ChannelModel` instead of `Connection` (amqplib 0.10.x API change). (`event.publisher.ts`)
+- **DTO `strictPropertyInitialization`** — Added `!` definite assignment assertion to `CreatePaymentDto.amount`. (`payment.dto.ts`)
+- **`@types/opossum` missing** — Installed dev dependency to resolve TS7016 errors.
+- **MercadoPagoProvider spec - `input` out of scope** — Moved `input` variable to `describe` block level so all inner blocks can reference it.
+
+### Added
+- **DLQ (Dead Letter Queue)** — RabbitMQ topology now includes `payment.dlx` exchange and `payment.dlq` queue. Notification and email queues configured with `x-dead-letter-exchange` and `x-message-ttl`. (`event.publisher.ts:62-93`)
+- **Structured logging in API Gateway** — All `console.*` calls replaced with structured JSON logger (`log()` function). (`api-gateway/src/main.ts`)
+- **Correlation ID propagation** — API Gateway proxy now injects `x-correlation-id` header into upstream requests via `proxyReq` hook. (`api-gateway/src/main.ts`)
+
+### Changed
+- **MetricsService integrated** — `PaymentService` now calls `metricsService.incrementPaymentsCreated()`, `incrementPaymentsCompleted()`, `incrementPaymentsFailed()`, and `observePaymentProcessing()` at all relevant points in the payment lifecycle. (`payment.service.ts`)
+- **AlertService integrated** — `PaymentService` sends `sendErrorAlert()` on Mercado Pago failures with payment context. (`payment.service.ts:142-146`)
+- **Tests updated** — All spec files updated to match new constructor signatures and expected behaviors. 66 tests passing (up from 35+9 in Phase 2).
+
+### Performance
+- Circuit breaker is now a single shared instance, eliminating duplicate state tracking.
+
+---
+
 ## [1.1.0] - 2025-01-25
 
 ### Added

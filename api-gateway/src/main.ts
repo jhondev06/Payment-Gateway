@@ -5,6 +5,16 @@ import Redis from 'ioredis';
 import { v4 as uuidv4 } from 'uuid';
 import { validateSecrets, getSecretValue } from './secrets.validator';
 
+function log(level: string, message: string, data?: Record<string, unknown>) {
+    console.log(JSON.stringify({
+        timestamp: new Date().toISOString(),
+        service: 'api-gateway',
+        level,
+        message,
+        ...data,
+    }));
+}
+
 validateSecrets([
     {
         name: 'API Key',
@@ -61,8 +71,8 @@ const authMiddleware = (req: Request, res: Response, next: NextFunction) => {
 
 // Middleware: Rate Limiting
 const rateLimitMiddleware = async (req: Request, res: Response, next: NextFunction) => {
-    const apiKey = req.headers['x-api-key'] as string || 'anonymous';
-    const key = `ratelimit:${apiKey}`;
+    const clientApiKey = req.headers['x-api-key'] as string || 'anonymous';
+    const key = `ratelimit:${clientApiKey}`;
     const limit = 100; // requests per minute
     const ttl = 60; // seconds
 
@@ -85,7 +95,7 @@ const rateLimitMiddleware = async (req: Request, res: Response, next: NextFuncti
         next();
     } catch (error) {
         // Redis down - allow request (graceful degradation)
-        console.warn('Rate limit check failed, allowing request');
+        log('WARN', 'Rate limit check failed, allowing request', { error: (error as Error).message });
         next();
     }
 };
@@ -93,50 +103,47 @@ const rateLimitMiddleware = async (req: Request, res: Response, next: NextFuncti
 // Middleware: Request Logging
 app.use((req: Request, res: Response, next: NextFunction) => {
     const start = Date.now();
+    const correlationId = req.headers['x-correlation-id'] as string;
     res.on('finish', () => {
-        console.log(JSON.stringify({
-            timestamp: new Date().toISOString(),
+        log('INFO', `${req.method} ${req.path}`, {
             method: req.method,
             path: req.path,
             status: res.statusCode,
-            duration: `${Date.now() - start}ms`,
-            correlationId: req.headers['x-correlation-id'],
-        }));
+            duration_ms: Date.now() - start,
+            correlationId,
+        });
     });
     next();
-});
-
-// Apply middlewares
-app.use(authMiddleware);
-app.use(rateLimitMiddleware);
-
-// Health check (no proxy)
-app.get('/health', (req: Request, res: Response) => {
-    res.json({
-        status: 'ok',
-        service: 'api-gateway',
-        timestamp: new Date().toISOString(),
-    });
 });
 
 // Proxy to Payment Service
 const paymentServiceUrl = process.env.PAYMENT_SERVICE_URL || 'http://localhost:3001';
 
-app.use('/payments', createProxyMiddleware({
+const proxyOptions = {
     target: paymentServiceUrl,
     changeOrigin: true,
+    on: {
+        proxyReq: (proxyReq: any, req: Request) => {
+            const corrId = req.headers['x-correlation-id'];
+            if (corrId) {
+                proxyReq.setHeader('x-correlation-id', corrId);
+            }
+        },
+    },
+};
+
+app.use('/payments', createProxyMiddleware({
+    ...proxyOptions,
     pathRewrite: { '^/payments': '/payments' },
 }));
 
 app.use('/webhooks', createProxyMiddleware({
-    target: paymentServiceUrl,
-    changeOrigin: true,
+    ...proxyOptions,
     pathRewrite: { '^/webhooks': '/webhooks' },
 }));
 
 app.use('/sandbox', createProxyMiddleware({
-    target: paymentServiceUrl,
-    changeOrigin: true,
+    ...proxyOptions,
     pathRewrite: { '^/sandbox': '/sandbox' },
 }));
 
@@ -149,14 +156,11 @@ app.use((req: Request, res: Response) => {
 });
 
 // Error handler
-app.use((err: Error, req: Request, res: Response, next: NextFunction) => {
-    console.error(JSON.stringify({
-        timestamp: new Date().toISOString(),
-        level: 'ERROR',
-        message: err.message,
+app.use((err: Error, req: Request, res: Response, _next: NextFunction) => {
+    log('ERROR', err.message, {
         stack: err.stack,
-        correlationId: req.headers['x-correlation-id'],
-    }));
+        correlationId: req.headers['x-correlation-id'] as string,
+    });
 
     res.status(500).json({
         error: 'Internal Server Error',
@@ -166,10 +170,7 @@ app.use((err: Error, req: Request, res: Response, next: NextFunction) => {
 
 // Start server
 app.listen(port, () => {
-    console.log(JSON.stringify({
-        timestamp: new Date().toISOString(),
-        level: 'INFO',
-        message: `API Gateway running on port ${port}`,
+    log('INFO', `API Gateway running on port ${port}`, {
         environment: process.env.NODE_ENV || 'development',
-    }));
+    });
 });

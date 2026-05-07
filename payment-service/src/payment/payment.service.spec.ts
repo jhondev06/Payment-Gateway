@@ -3,8 +3,10 @@ import { IdempotencyService } from './idempotency.service';
 import { PaymentRepository } from './payment.repository';
 import { MercadoPagoProvider } from '../infra/mercadopago/mercadopago.provider';
 import { EventPublisher } from '../infra/rabbitmq/event.publisher';
+import { MetricsService } from '../shared/metrics.service';
+import { AlertService } from '../shared/alert.service';
 import { Payment } from './payment.dto';
-import { NotFoundException } from '@nestjs/common';
+import { NotFoundException, ConflictException } from '@nestjs/common';
 
 /**
  * Testes unitários para PaymentService
@@ -15,6 +17,8 @@ describe('PaymentService', () => {
     let paymentRepository: jest.Mocked<PaymentRepository>;
     let mercadoPago: jest.Mocked<MercadoPagoProvider>;
     let eventPublisher: jest.Mocked<EventPublisher>;
+    let metricsService: jest.Mocked<MetricsService>;
+    let alertService: jest.Mocked<AlertService>;
 
     const mockPayment: Payment = {
         id: 'test-uuid',
@@ -62,11 +66,34 @@ describe('PaymentService', () => {
             isHealthy: jest.fn(),
         } as unknown as jest.Mocked<EventPublisher>;
 
+        metricsService = {
+            incrementPaymentsCreated: jest.fn(),
+            incrementPaymentsCompleted: jest.fn(),
+            incrementPaymentsFailed: jest.fn(),
+            observePaymentProcessing: jest.fn(),
+            incrementRequests: jest.fn(),
+            observeRequestDuration: jest.fn(),
+            setActiveConnections: jest.fn(),
+            setQueueLength: jest.fn(),
+            setCircuitBreakerState: jest.fn(),
+            getMetrics: jest.fn(),
+        } as unknown as jest.Mocked<MetricsService>;
+
+        alertService = {
+            sendAlert: jest.fn(),
+            sendCriticalAlert: jest.fn(),
+            sendErrorAlert: jest.fn(),
+            sendWarningAlert: jest.fn(),
+            sendInfoAlert: jest.fn(),
+        } as unknown as jest.Mocked<AlertService>;
+
         service = new PaymentService(
             idempotencyService,
             paymentRepository,
             mercadoPago,
             eventPublisher,
+            metricsService,
+            alertService,
         );
     });
 
@@ -178,6 +205,15 @@ describe('PaymentService', () => {
                 'payment.events',
                 expect.objectContaining({ type: 'PAYMENT_COMPLETED' }),
             );
+        });
+
+        it('deve rejeitar transição inválida de status', async () => {
+            const paidPayment = { ...mockPayment, status: 'PAID' as const };
+            paymentRepository.findByExternalId.mockResolvedValue(paidPayment);
+
+            await expect(
+                service.updatePaymentStatus('SANDBOX-123', 'FAILED'),
+            ).rejects.toThrow(ConflictException);
         });
 
         it('deve lançar NotFoundException quando external_id não encontrado', async () => {

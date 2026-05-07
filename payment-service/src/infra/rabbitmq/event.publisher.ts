@@ -10,7 +10,7 @@ import { Logger } from '../../shared/logger';
  */
 @Injectable()
 export class EventPublisher implements OnModuleDestroy {
-    private connection: amqp.Connection | null = null;
+    private connection: amqp.ChannelModel | null = null;
     private channel: amqp.Channel | null = null;
     private readonly logger = new Logger('EventPublisher');
     private connecting = false;
@@ -32,7 +32,7 @@ export class EventPublisher implements OnModuleDestroy {
             // Declara exchanges e filas
             await this.setupTopology();
 
-            this.connection.on('error', (err) => {
+            this.connection.on('error', (err: Error) => {
                 this.logger.error('Erro de conexão RabbitMQ', err);
                 this.channel = null;
                 this.connection = null;
@@ -65,19 +65,38 @@ export class EventPublisher implements OnModuleDestroy {
         // Exchange de eventos de pagamento
         await this.channel.assertExchange('payment.events', 'topic', { durable: true });
 
-        // Filas
+        // Exchange de Dead Letter Queue
+        await this.channel.assertExchange('payment.dlx', 'topic', { durable: true });
+
+        // Fila DLQ para mensagens que falharam após todos os retries
+        await this.channel.assertQueue('payment.dlq', {
+            durable: true,
+        });
+        await this.channel.bindQueue('payment.dlq', 'payment.dlx', '#');
+
+        // Filas principais com DLX configurado
         await this.channel.assertQueue('notification.events', {
             durable: true,
+            arguments: {
+                'x-dead-letter-exchange': 'payment.dlx',
+                'x-dead-letter-routing-key': 'notification.dead',
+                'x-message-ttl': 86400000,
+            },
         });
         await this.channel.assertQueue('email.events', {
             durable: true,
+            arguments: {
+                'x-dead-letter-exchange': 'payment.dlx',
+                'x-dead-letter-routing-key': 'email.dead',
+                'x-message-ttl': 86400000,
+            },
         });
 
         // Bindings
         await this.channel.bindQueue('notification.events', 'payment.events', 'payment.*');
         await this.channel.bindQueue('email.events', 'payment.events', 'payment.*');
 
-        this.logger.info('Topologia RabbitMQ configurada');
+        this.logger.info('Topologia RabbitMQ configurada (com DLQ)');
     }
 
     /**

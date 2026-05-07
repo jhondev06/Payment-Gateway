@@ -56,7 +56,7 @@ async function bootstrap() {
     app.enableCors();
 
     const bodyParser = require('body-parser');
-    app.use(bodyParser.json({ verify: (req: any, res: any, buf: any) => {
+    app.use(bodyParser.json({ verify: (req: any, _res: any, buf: Buffer) => {
         req.rawBody = buf;
     } }));
 
